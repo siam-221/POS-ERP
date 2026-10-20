@@ -1,0 +1,5 @@
+flask>=3.0
+requests
+pillow
+gunicorn
+openpyxl>=3.1

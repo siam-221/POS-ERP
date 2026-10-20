@@ -1,0 +1,128 @@
+# Alien Tees x Bodyfitters — Stock Room (একটাই ফাইল: সার্ভার + ওয়েবসাইট)
+# চালানো:  pip install flask requests pillow   →   python app.py   →   http://localhost:5000
+import base64, csv, importlib, io, json, os, pickle, re, sqlite3, subprocess, sys, tempfile, threading, time, shutil, zipfile
+from datetime import datetime, time as datetime_time
+from zoneinfo import ZoneInfo
+from colorsys import rgb_to_hsv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
+from urllib.parse import urlparse
+import requests
+from openpyxl import load_workbook
+from flask import Flask, Response, jsonify, request, session, send_file
+from PIL import Image
+from werkzeug.security import check_password_hash, generate_password_hash
+
+SECRET_KEY = os.environ.get("SECRET_KEY", "change-this-secret-key")
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "alien@123")   # প্রথমবার চালানোর আগে বদলান
+CACHE_TTL, STOCK_TTL = 600, 60
+
+app = Flask(__name__)
+app.secret_key = SECRET_KEY
+DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.db")
+INSTANCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "instance")
+EXCEL_STOCK_FILE = os.path.join(INSTANCE, "stock_master.xlsx")
+EXCEL_BACKUP_DIR = os.path.join(INSTANCE, "stock_backups")
+FULL_BACKUP_DIR = os.path.join(INSTANCE, "full_backups")
+EXCEL_LOCK = threading.RLock()
+DHAKA_TZ = ZoneInfo("Asia/Dhaka")
+
+PERMS = {
+    "price_edit": "দাম এডিট করতে পারবে",
+    "stock_manage": "পূর্ণ স্টক ব্যবস্থাপনা (সব পরিবর্তন)",
+    "stock_dashboard": "স্টক ড্যাশবোর্ড খুলতে পারবে",
+    "stock_view": "স্টক ড্যাশবোর্ড দেখতে পারবে",
+    "stock_value_view": "দাম ও স্টক মূল্য দেখতে পারবে",
+    "stock_history_view": "স্টক হিস্ট্রি দেখতে পারবে",
+    "stock_add": "স্টকে পরিমাণ যোগ করতে পারবে",
+    "stock_reduce": "স্টক থেকে পরিমাণ কমাতে পারবে",
+    "stock_set": "স্টকের পরিমাণ সরাসরি নির্ধারণ করতে পারবে",
+    "stock_comment": "স্টক বিক্রির কমেন্ট দিতে পারবে",
+    "stock_comment_delete": "স্টক বিক্রির কমেন্ট মুছতে পারবে",
+    "view_stock": "স্টক দেখতে পারবে",
+    "search": "টেক্সট সার্চ করতে পারবে",
+    "image_search": "ইমেজ সার্চ করতে পারবে",
+    "view_product": "প্রোডাক্ট খুলে দেখতে পারবে",
+    "size_filter": "সাইজ অনুযায়ী ফিল্টার করতে পারবে",
+    "download": "HD ডাউনলোড করতে পারবে",
+    "copy": "HD কপি করতে পারবে",
+    "link_copy": "লিংক কপি করতে পারবে",
+    "report": "প্রোডাক্ট রিপোর্ট করতে পারবে",
+    "id_copy": "Product ID কপি করতে পারবে",
+    "name_copy": "Product Name কপি করতে পারবে",
+    "full_info_copy": "Full Info কপি করতে পারবে",
+    "share_product": "Product Share করতে পারবে",
+    "website_view": "ওয়েবসাইটে যেতে পারবে",
+}
+DEFAULT_PERMS = {k: False for k in PERMS}
+
+# Staff/User: আগের কাজগুলো চালু থাকবে; price_edit আলাদা permission।
+STAFF_DEFAULTS = {
+    "search": True, "image_search": True, "view_product": True,
+    "view_stock": False, "size_filter": True,
+    "download": True, "copy": True, "link_copy": True,
+    "favorite": True, "report": True,
+    "id_copy": True, "name_copy": True, "full_info_copy": True,
+    "share_product": True, "website_view": True,
+    "price_edit": False,
+    "stock_manage": False,
+    "stock_dashboard": False, "stock_view": False, "stock_value_view": False, "stock_history_view": False,
+    "stock_comment": True, "stock_comment_delete": False,
+}
+
+# CS: শুধু search → product view → real website link।
+CS_DEFAULTS = {
+    "search": True, "image_search": True, "view_product": True, "website_view": True,
+    "price_edit": False, "view_stock": False, "size_filter": False,
+    "stock_manage": False,
+    "stock_dashboard": False, "stock_view": False, "stock_value_view": False, "stock_history_view": False,
+    "stock_comment": True, "stock_comment_delete": False,
+    "download": False, "copy": False, "link_copy": False,
+    "favorite": False, "report": False,
+    "id_copy": False, "name_copy": False, "full_info_copy": False, "share_product": False,
+}
+
+# Guest/Customer permissions Admin Management থেকে আলাদা control করা যাবে।
+GUEST_PERM_LABELS = {
+    "search": "🔎 টেক্সট সার্চ",
+    "image_search": "🖼️ ইমেজ সার্চ",
+    "view_product": "👁️ প্রোডাক্ট দেখা",
+    "view_stock": "📦 স্টক দেখা",
+    "size_filter": "📏 সাইজ ফিল্টার",
+    "download": "⬇️ HD ডাউনলোড",
+    "copy": "⧉ HD ছবি কপি",
+    "link_copy": "🔗 লিংক কপি",
+    "id_copy": "📋 ID কপি",
+    "name_copy": "📝 নাম কপি",
+    "full_info_copy": "📄 Full Info",
+    "share_product": "📤 Share",
+    "website_view": "🌐 ওয়েবসাইটে দেখুন",
+}
+GUEST_DEFAULTS = {
+    "search": True, "image_search": True, "view_product": True,
+    "view_stock": False, "size_filter": False,
+    "download": False, "copy": False, "link_copy": False,
+    "id_copy": True, "name_copy": True, "full_info_copy": True,
+    "share_product": True, "website_view": True,
+}
+
+def db():
+    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
+
+def init():
+    with db() as c:
+        c.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE, pw TEXT, role TEXT, perms TEXT NOT NULL DEFAULT '{}')")
+        try: c.execute("ALTER TABLE users ADD COLUMN perms TEXT NOT NULL DEFAULT '{}'" )
+        except sqlite3.OperationalError: pass
+        c.execute("CREATE TABLE IF NOT EXISTS activity_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, action TEXT, query TEXT, details TEXT, created_at REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS favorites(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, product_key TEXT, created_at REAL, UNIQUE(username, product_key))")
+        c.execute("CREATE TABLE IF NOT EXISTS recent_views(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, product_key TEXT, viewed_at REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS product_reports(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, product_key TEXT, reason TEXT, created_at REAL, status TEXT DEFAULT 'open')")
+        c.execute("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY, kind TEXT, name TEXT, url TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS prices(k TEXT PRIMARY KEY, price REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS excel_stock_history(id INTEGER PRIMARY KEY AUTOINCREMENT, sheet TEXT, row_number INTEGER, product_code TEXT, size TEXT, old_qty INTEGER, new_qty INTEGER, username TEXT, note TEXT, created_at REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS excel_stock_batches(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, change_count INTEGER, plus_units INTEGER, minus_units INTEGER, created_at REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS excel_stock_comments(id INTEGER PRIMARY KEY AUTOINCREMENT, sheet TEXT, product_code TEXT, size TEXT, sold_qty INTEGER NOT NULL, message TEXT, username TEXT NOT NULL, created_at REAL NOT NULL)")
+        c.execute("CREATE TABLE IF NOT EXISTS excel_stock_imports(id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT, sha256 TEXT, bytes INTEGER, username TEXT, created_at REAL)")

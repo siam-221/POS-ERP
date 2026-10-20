@@ -1,0 +1,15 @@
+Alien Bodyfitters ERP — Build Notes (2026-10-15)
+
+এই বিল্ডে করা পরিবর্তন:
+1. ক্যাটালগের পণ্য তালিকা এখন শুধু C["products"] ক্যাটালগ সোর্স থেকে তৈরি হয়; Excel-only row আলাদা পণ্য হিসেবে যোগ হয় না। Excel stock workbook-এর stock mapping আগের মতোই ব্যবহৃত হয়।
+2. Product count-ও শুধু ক্যাটালগের মোট পণ্য গণনা করে।
+3. “দ্রুত মোড” ও “সাম্প্রতিক / আমার তালিকা” UI অপশন লুকানো হয়েছে।
+4. Courier date filters-এ “ঐচ্ছিক” লেখা যোগ হয়েছে; ফাঁকা তারিখ থাকলে all-time search behavior আগের query logic অনুযায়ী থাকবে।
+5. Notification card clickable এবং keyboard accessible করা হয়েছে; ref অনুযায়ী return/order/courier/stock/admin target খোলার চেষ্টা করে।
+6. দৃশ্যমান কিছু Admin/Order/Return/Courier লেবেল বাংলায় করা হয়েছে।
+7. Main header ও admin header-এ সবুজ ERP ব্র্যান্ডিং এবং dashboard cards-এ consistent accent border যোগ হয়েছে।
+
+যাচাই:
+- app.py Python syntax compile check সফল।
+- লাইভ Flask runtime, courier provider API, browser-based UI regression এবং live Excel workbook integration এই পরিবেশে সম্পূর্ণ end-to-end পরীক্ষা করা হয়নি।
+- প্রথমে আলাদা কপি/ব্যাকআপে চালিয়ে পরীক্ষা করুন; production folder-এ সরাসরি overwrite করবেন না।
